@@ -1,0 +1,37 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: unzip -q vibecoderai*.zip -d proj
+      - name: Fetch llama.cpp (pinned)
+        run: git clone --depth 1 --branch b12020 https://github.com/ggml-org/llama.cpp proj/app/src/main/cpp/llama.cpp
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.3.1
+      - run: yes | sdkmanager --licenses > /dev/null || true
+      - run: sdkmanager "platforms;android-36" "cmake;3.22.1" || true
+      - name: Build WebView shell (embedded into the app)
+        run: |
+          cd proj
+          gradle :webshell:assembleDebug --no-daemon --console=plain
+          mkdir -p app/src/main/assets
+          cp webshell/build/outputs/apk/debug/*.apk app/src/main/assets/webshell.apk
+          ls -la app/src/main/assets
+      - run: cd proj && gradle :app:assembleDebug --no-daemon --console=plain
+      - name: Show native + template contents
+        if: always()
+        run: unzip -l proj/app/build/outputs/apk/debug/app-debug.apk | grep -E "libllama-android|webshell" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: VibeCoderAI-debug-apk
+          path: proj/app/build/outputs/apk/debug/*.apk
