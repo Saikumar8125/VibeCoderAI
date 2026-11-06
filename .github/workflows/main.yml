@@ -5,6 +5,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Secrets cannot be used in step `if:` directly; this flag is "true" only when all three exist.
+      HAS_SIGNING: ${{ secrets.KEYSTORE_BASE64 != '' && secrets.STORE_PASSWORD != '' && secrets.KEY_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v4
       - run: unzip -q vibecoderai*.zip -d proj
@@ -30,8 +33,60 @@ jobs:
       - name: Show native + template contents
         if: always()
         run: unzip -l proj/app/build/outputs/apk/debug/app-debug.apk | grep -E "libllama-android|webshell" || true
+      - name: Collect debug APK
+        if: always()
+        run: mkdir -p out/debug && cp proj/app/build/outputs/apk/debug/*.apk out/debug/ || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: VibeCoderAI-debug-apk
-          path: proj/app/build/outputs/apk/debug/*.apk
+          path: out/debug/*.apk
+
+      # ---- Release APK: only when KEYSTORE_BASE64, STORE_PASSWORD and KEY_PASSWORD secrets exist ----
+      # The keystore must contain the key alias "upload" (see signingConfigs in app/build.gradle.kts).
+      - name: Build signed release APK
+        if: env.HAS_SIGNING == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/my-upload-key.jks"
+          export KEYSTORE_PATH="$RUNNER_TEMP/my-upload-key.jks"
+          cd proj
+          gradle :app:assembleRelease --no-daemon --console=plain
+          mkdir -p ../out/release && cp app/build/outputs/apk/release/*.apk ../out/release/
+          rm -f "$RUNNER_TEMP/my-upload-key.jks"
+      - uses: actions/upload-artifact@v4
+        if: env.HAS_SIGNING == 'true'
+        with:
+          name: VibeCoderAI-release-apk
+          path: out/release/*.apk
+
+      # ---- Optional GPU (Vulkan) variant: never breaks the main build ----
+      - name: Vulkan + SPIRV headers (not shipped in the NDK)
+        id: vkheaders
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers "$RUNNER_TEMP/Vulkan-Headers"
+          git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers "$RUNNER_TEMP/SPIRV-Headers"
+          cmake -S "$RUNNER_TEMP/SPIRV-Headers" -B "$RUNNER_TEMP/spirv-build" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/spirv-install" -DSPIRV_HEADERS_ENABLE_TESTS=OFF -DSPIRV_HEADERS_ENABLE_INSTALL=ON
+          cmake --install "$RUNNER_TEMP/spirv-build"
+      - name: Build Vulkan (GPU) debug variant
+        id: vulkan
+        if: steps.vkheaders.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cd proj
+          gradle :app:assembleDebug -PvibeVulkan=true \
+            -PvibeVulkanHeaders="$RUNNER_TEMP/Vulkan-Headers" \
+            -PvibeSpirvHeadersDir="$RUNNER_TEMP/spirv-install/share/cmake/SPIRV-Headers" \
+            --no-daemon --console=plain
+          mkdir -p ../out/vulkan
+          for f in app/build/outputs/apk/debug/*.apk; do cp "$f" "../out/vulkan/$(basename "${f%.apk}")-vulkan.apk"; done
+      - uses: actions/upload-artifact@v4
+        if: steps.vulkan.outcome == 'success'
+        continue-on-error: true
+        with:
+          name: VibeCoderAI-vulkan-debug-apk
+          path: out/vulkan/*.apk
